@@ -1,0 +1,238 @@
+// Jobs and their configuration. CHECK constraints, partial indexes, column
+// compression and the initial configuration rows live in the migrations,
+// because the Prisma schema cannot express them.
+
+enum JobStatus {
+  queued
+  processing
+  completed
+  failed
+
+  @@map("job_status")
+}
+
+// Where a completed job's result came from.
+enum JobResultSource {
+  provider // this job called the provider
+  cache // a stored result for the same content
+  coalesced // another job's in-flight provider call for the same content
+
+  @@map("job_result_source")
+}
+
+// ---------------------------------------------------------------------------
+// Configuration: small, read-mostly tables loaded into memory by the app.
+// ---------------------------------------------------------------------------
+
+model JobType {
+  code              String   @id @db.VarChar(32)
+  cost              Int
+  max_input_chars   Int
+  input_formats     String[] @db.VarChar(32)
+  // Part of the content hash: changing the prompt invalidates stored results.
+  prompt_version    String   @db.VarChar(32)
+  max_attempt_count Int
+  timeout_ms        Int
+  // How long a result stays in the cache Redis. The stored result in
+  // job_contents does not expire.
+  cache_ttl_seconds Int
+  is_enabled        Boolean  @default(true)
+  created_at        DateTime @default(now()) @db.Timestamptz(3)
+  updated_at        DateTime @updatedAt @db.Timestamptz(3)
+
+  routes   JobTypeRoute[]
+  contents JobContent[]
+
+  @@map("job_types")
+}
+
+model JobProvider {
+  code            String   @id @db.VarChar(64)
+  // Name of the adapter class in code; a row without a matching adapter is rejected at load time.
+  adapter         String   @db.VarChar(64)
+  // Global limit across all workers.
+  max_concurrency Int
+  is_enabled      Boolean  @default(true)
+  created_at      DateTime @default(now()) @db.Timestamptz(3)
+  updated_at      DateTime @updatedAt @db.Timestamptz(3)
+
+  routes JobTypeRoute[]
+  jobs   Job[]
+
+  @@map("job_providers")
+}
+
+model JobTypeRoute {
+  job_type_code     String   @db.VarChar(32)
+  job_provider_code String   @db.VarChar(64)
+  model_version     String   @db.VarChar(64)
+  // Share of new jobs when a type has more than one enabled route.
+  weight            Int
+  is_enabled        Boolean  @default(true)
+  created_at        DateTime @default(now()) @db.Timestamptz(3)
+  updated_at        DateTime @updatedAt @db.Timestamptz(3)
+
+  job_type     JobType     @relation(fields: [job_type_code], references: [code], onDelete: Restrict)
+  job_provider JobProvider @relation(fields: [job_provider_code], references: [code], onDelete: Restrict)
+
+  @@id([job_type_code, job_provider_code, model_version])
+  @@index([job_provider_code])
+  @@map("job_type_routes")
+}
+
+// ---------------------------------------------------------------------------
+// Jobs
+// ---------------------------------------------------------------------------
+
+// One row per distinct content: jobs of different users with the same type and
+// normalised input share it. Users never reach a row directly; reads go
+// through their own job, so content_id is never exposed by the API.
+model JobContent {
+  id            String    @id @default(uuid(7)) @db.Uuid
+  job_type_code String    @db.VarChar(32)
+  // sha256(type, prompt version, provider, model version, normalised input)
+  content_hash  Bytes
+  input         String
+  // Written once, by the first job that completes with this content, and never
+  // changed: a finished job's result stays what it was.
+  result        String?
+  result_at     DateTime? @db.Timestamptz(3)
+  created_at    DateTime  @default(now()) @db.Timestamptz(3)
+  updated_at    DateTime  @updatedAt @db.Timestamptz(3)
+
+  job_type JobType @relation(fields: [job_type_code], references: [code], onDelete: Restrict)
+  jobs     Job[]
+
+  @@unique([job_type_code, content_hash])
+  @@map("job_contents")
+}
+
+// Small, frequently updated rows: the job's state, never its text.
+model Job {
+  id                String           @id @db.Uuid
+  user_id           String           @db.VarChar(64)
+  job_content_id    String           @db.Uuid
+  // Route chosen when the job was created, so a config change never affects jobs in flight.
+  job_provider_code String           @db.VarChar(64)
+  model_version     String           @db.VarChar(64)
+  status            JobStatus        @default(queued)
+  // Price at creation time; reserve, capture and release always use this value.
+  cost              Int
+  error_code        String?          @db.VarChar(64)
+  result_source     JobResultSource?
+  attempt_count     Int              @default(0)
+  // Not dispatched again before this time (retry backoff).
+  run_after         DateTime         @default(now()) @db.Timestamptz(3)
+  // Lease: only the holder of lock_token may finish the job, and only until locked_until.
+  lock_token        String?          @db.Uuid
+  locked_until      DateTime?        @db.Timestamptz(3)
+  // Last dispatch, and sends no worker has received since: 0 once a worker has
+  // received the job's message, 1 when it goes back to the queue, +1 for each
+  // re-send by the reconciler, which waits longer the higher it is.
+  dispatched_at     DateTime         @default(now()) @db.Timestamptz(3)
+  dispatch_count    Int              @default(1)
+  created_at        DateTime         @default(now()) @db.Timestamptz(3)
+  updated_at        DateTime         @updatedAt @db.Timestamptz(3)
+  finished_at       DateTime?        @db.Timestamptz(3)
+
+  user            User                    @relation(fields: [user_id], references: [id], onDelete: Restrict)
+  content         JobContent              @relation(fields: [job_content_id], references: [id], onDelete: Restrict)
+  job_provider    JobProvider             @relation(fields: [job_provider_code], references: [code], onDelete: Restrict)
+  credit_ledger   UserCreditLedgerEntry[]
+  idempotency_key JobIdempotencyKey?
+  outbox_messages JobOutboxMessage[]
+
+  // List and CSV export, newest first (ids are UUID v7, so id order is creation order).
+  @@index([user_id, id(sort: Desc)])
+  // List filtered by status.
+  @@index([user_id, status, id(sort: Desc)])
+  @@index([job_content_id])
+  @@index([job_provider_code])
+  @@map("jobs")
+}
+
+// The first accepted request for each (user, Idempotency-Key). Rows expire after
+// 24 hours; a request that is rejected leaves no row.
+model JobIdempotencyKey {
+  user_id         String   @db.VarChar(64)
+  idempotency_key String   @db.VarChar(255)
+  // sha256 of the raw type and input, to tell a retry from a reused key.
+  request_hash    Bytes
+  job_id          String   @unique @db.Uuid
+  created_at      DateTime @default(now()) @db.Timestamptz(3)
+  expires_at      DateTime @db.Timestamptz(3)
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Restrict)
+  job  Job  @relation(fields: [job_id], references: [id], onDelete: Restrict)
+
+  @@id([user_id, idempotency_key])
+  @@index([expires_at])
+  @@map("job_idempotency_keys")
+}
+
+// Messages to publish to Kafka, written in the same transaction as the change
+// that causes them: a job's dispatch or an export's. Exactly one of job_id and
+// export_id is set. The relay publishes rows whose not_before has passed.
+model JobOutboxMessage {
+  id          String    @id @default(uuid(7)) @db.Uuid
+  job_id      String?   @db.Uuid
+  export_id   String?   @db.Uuid
+  topic       String    @db.VarChar(128)
+  // Kafka message key: jobs with the same content land on the same partition,
+  // so they reach the same worker and share one provider call there.
+  message_key String    @db.VarChar(128)
+  // The request that created the job or export; the worker logs it on every line.
+  request_id  String    @db.VarChar(64)
+  not_before  DateTime  @default(now()) @db.Timestamptz(3)
+  sent_at     DateTime? @db.Timestamptz(3)
+  created_at  DateTime  @default(now()) @db.Timestamptz(3)
+
+  job        Job?       @relation(fields: [job_id], references: [id], onDelete: Restrict)
+  job_export JobExport? @relation(fields: [export_id], references: [id], onDelete: Restrict)
+
+  @@index([job_id])
+  @@index([export_id])
+  @@map("job_outbox_messages")
+}
+
+enum JobExportStatus {
+  queued
+  processing
+  ready
+  failed
+  canceled
+  expired
+
+  @@map("job_export_status")
+}
+
+// A CSV export prepared in the background (EXPORT_MODE async or auto): the
+// worker writes the user's jobs to the file store, the user downloads the
+// file until expires_at. The lease fields work as on jobs.
+model JobExport {
+  id             String          @id @db.Uuid
+  user_id        String          @db.VarChar(64)
+  status         JobExportStatus @default(queued)
+  // Key in the file store; set while the file exists (ready).
+  file_key       String?         @db.VarChar(255)
+  row_count      Int?
+  error_code     String?         @db.VarChar(64)
+  attempt_count  Int             @default(0)
+  run_after      DateTime        @default(now()) @db.Timestamptz(3)
+  lock_token     String?         @db.Uuid
+  locked_until   DateTime?       @db.Timestamptz(3)
+  // As on jobs: sends no worker has received since the last receipt.
+  dispatched_at  DateTime        @default(now()) @db.Timestamptz(3)
+  dispatch_count Int             @default(1)
+  created_at     DateTime        @default(now()) @db.Timestamptz(3)
+  updated_at     DateTime        @updatedAt @db.Timestamptz(3)
+  finished_at    DateTime?       @db.Timestamptz(3)
+  // The file is deleted after this time and the export becomes expired.
+  expires_at     DateTime?       @db.Timestamptz(3)
+
+  user            User               @relation(fields: [user_id], references: [id], onDelete: Restrict)
+  outbox_messages JobOutboxMessage[]
+
+  @@index([user_id, id(sort: Desc)])
+  @@map("job_exports")
+}

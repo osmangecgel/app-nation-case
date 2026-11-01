@@ -1,0 +1,54 @@
+// Users and their credits. Every balance change is a ledger entry written in the
+// same transaction as the change, so balance and reserved can always be rebuilt
+// from user_credit_ledger:
+//   balance  = grant - reserve + release
+//   reserved = reserve - capture - release
+// CHECK constraints and partial unique indexes live in the migrations, because
+// the Prisma schema cannot express them.
+
+enum UserCreditEntryType {
+  grant
+  reserve
+  capture
+  release
+
+  @@map("user_credit_entry_type")
+}
+
+model User {
+  // The X-User-Id header value; authentication is out of scope, so its format is not ours to choose.
+  id               String   @id @db.VarChar(64)
+  balance          Int      @default(0)
+  reserved         Int      @default(0)
+  active_job_count Int      @default(0)
+  created_at       DateTime @default(now()) @db.Timestamptz(3)
+  updated_at       DateTime @updatedAt @db.Timestamptz(3)
+
+  credit_ledger    UserCreditLedgerEntry[]
+  jobs             Job[]
+  idempotency_keys JobIdempotencyKey[]
+  job_exports      JobExport[]
+
+  @@map("users")
+}
+
+// Append-only: rows are never updated or deleted, so there is no updated_at.
+model UserCreditLedgerEntry {
+  id         String              @id @default(uuid(7)) @db.Uuid
+  user_id    String              @db.VarChar(64)
+  job_id     String?             @db.Uuid
+  entry_type UserCreditEntryType
+  amount     Int
+  created_at DateTime            @default(now()) @db.Timestamptz(3)
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Restrict)
+  job  Job? @relation(fields: [job_id], references: [id], onDelete: Restrict)
+
+  // The two partial unique indexes in the migration (one reserve per job, one
+  // capture or release per job) do not replace this one: the foreign key check
+  // run for every deleted job cannot use a partial index and would scan the
+  // whole ledger instead.
+  @@index([user_id])
+  @@index([job_id])
+  @@map("user_credit_ledger")
+}

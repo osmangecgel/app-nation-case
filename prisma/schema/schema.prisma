@@ -1,0 +1,13 @@
+// Models are split by area: users.prisma (users module) and jobs.prisma (the
+// job-* modules). Which module owns which table is in ARCHITECTURE_STANDARDS.md (ARCH-04, ARCH-06).
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "ts"
+}
+
+datasource db {
+  provider = "postgresql"
+}

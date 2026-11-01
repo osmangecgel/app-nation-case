@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "."
+  },
+  // The Prisma client is generated as TypeScript into prisma/generated, so it is
+  // compiled with the app: dist/src holds the app, dist/prisma/generated the client.
+  "include": ["src", "prisma/generated"],
+  "exclude": ["node_modules", "test", "dist", "**/*spec.ts"]
+}

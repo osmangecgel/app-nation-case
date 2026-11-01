@@ -1,0 +1,1384 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/health": {
+      "get": {
+        "description": "Used by load balancers and orchestrators. Returns 503 only when the database is unreachable: without the cache the API keeps serving requests, so it reports degraded with 200.",
+        "operationId": "health.check",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "The API can serve requests (ok or degraded).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error codes: INTERNAL_ERROR.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The database is down.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Check the API and its dependencies",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/internal/users/{id}/credits": {
+      "post": {
+        "description": "Creates the user on the first grant. Writes a grant entry to the credit ledger.",
+        "operationId": "users.grant",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[\\x21-\\x7e]+$",
+              "description": "Caller id. Authentication is out of scope.",
+              "example": "user-1"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrantCredits"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserCredits"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error codes: VALIDATION_FAILED, INVALID_JSON.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Error codes: PAYLOAD_TOO_LARGE.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error codes: BALANCE_LIMIT_EXCEEDED.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error codes: TOO_MANY_REQUESTS.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error codes: INTERNAL_ERROR.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Add credits to a user",
+        "tags": [
+          "internal"
+        ]
+      },
+      "get": {
+        "description": "A user who never received credits has zero balance.",
+        "operationId": "users.get",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[\\x21-\\x7e]+$",
+              "description": "Caller id. Authentication is out of scope.",
+              "example": "user-1"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserCredits"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error codes: VALIDATION_FAILED.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error codes: TOO_MANY_REQUESTS.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error codes: INTERNAL_ERROR.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Get a user's credits",
+        "tags": [
+          "internal"
+        ]
+      }
+    },
+    "/v1/jobs": {
+      "post": {
+        "description": "Reserves the job cost from the balance and queues the job. The result is fetched later by job id.",
+        "operationId": "jobs.create",
+        "parameters": [
+          {
+            "name": "X-User-Id",
+            "in": "header",
+            "description": "Caller id: 1 to 64 printable ASCII characters. Authentication is out of scope.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Unique per request, at most 255 characters. A retry with the same key and body returns the first response for 24 hours.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateJob"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobCreated"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error codes: VALIDATION_FAILED, INVALID_JSON.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error codes: USER_ID_REQUIRED.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Error codes: INSUFFICIENT_CREDITS.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error codes: CONFLICT.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Error codes: PAYLOAD_TOO_LARGE.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error codes: IDEMPOTENCY_KEY_REUSED.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error codes: TOO_MANY_ACTIVE_JOBS, TOO_MANY_REQUESTS.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error codes: INTERNAL_ERROR.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Start a job",
+        "tags": [
+          "jobs"
+        ]
+      },
+      "get": {
+        "description": "Newest first, with cursor pagination.",
+        "operationId": "jobs.list",
+        "parameters": [
+          {
+            "name": "X-User-Id",
+            "in": "header",
+            "description": "Caller id: 1 to 64 printable ASCII characters. Authentication is out of scope.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "default": 20,
+              "description": "Rows per page, from 1 to 100.",
+              "example": 20,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "description": "nextCursor from the previous page. Leave empty for the first page.",
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "description": "Only jobs in this status.",
+              "type": "string",
+              "enum": [
+                "queued",
+                "processing",
+                "completed",
+                "failed"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error codes: VALIDATION_FAILED.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error codes: USER_ID_REQUIRED.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error codes: TOO_MANY_REQUESTS.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error codes: INTERNAL_ERROR.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "List jobs",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
+    "/v1/jobs/export.csv": {
+      "get": {
+        "description": "Every job of the caller, newest first. Columns: job_id, type, status, cost, error_code, created_at, finished_at. EXPORT_MODE stream (default) streams the file; async answers 202 with an export to poll (see /v1/exports); auto streams up to EXPORT_STREAM_MAX_ROWS jobs and answers 202 above. At most one streamed export per user and a bounded number in total: a request waits up to EXPORT_ADMISSION_WAIT_MS for a slot, then gets 429 with Retry-After.",
+        "operationId": "jobs.export",
+        "parameters": [
+          {
+            "name": "X-User-Id",
+            "in": "header",
+            "description": "Caller id: 1 to 64 printable ASCII characters. Authentication is out of scope.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CSV file."
+          },
+          "202": {
+            "description": "Prepared in the background; poll Location.",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobExport"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error codes: USER_ID_REQUIRED.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error codes: EXPORT_IN_PROGRESS, EXPORT_SLOTS_BUSY, TOO_MANY_REQUESTS.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error codes: INTERNAL_ERROR.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Download all jobs as CSV",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
+    "/v1/jobs/{id}": {
+      "get": {
+        "description": "Status, result when completed and error code when failed. Another user’s job is reported as not found.",
+        "operationId": "jobs.get",
+        "parameters": [
+          {
+            "name": "X-User-Id",
+            "in": "header",
+            "description": "Caller id: 1 to 64 printable ASCII characters. Authentication is out of scope.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "description": "Job id.",
+              "example": "0192f3a1-7c4e-7b2a-9d1f-3e5a8b6c2d10"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error codes: USER_ID_REQUIRED.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error codes: JOB_NOT_FOUND.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error codes: TOO_MANY_REQUESTS.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error codes: INTERNAL_ERROR.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Get a job",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
+    "/v1/exports": {
+      "post": {
+        "description": "Prepared in the background. Location points to the status, Retry-After says when to poll. An unfinished export, or one that became ready in the last 5 minutes, is returned instead of a new one.",
+        "operationId": "exports.request",
+        "parameters": [
+          {
+            "name": "X-User-Id",
+            "in": "header",
+            "description": "Caller id: 1 to 64 printable ASCII characters. Authentication is out of scope.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobExport"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error codes: USER_ID_REQUIRED.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error codes: EXPORT_NOT_FOUND.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error codes: TOO_MANY_REQUESTS.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error codes: INTERNAL_ERROR.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Request a CSV export of all jobs",
+        "tags": [
+          "exports"
+        ]
+      }
+    },
+    "/v1/exports/{id}": {
+      "get": {
+        "description": "While queued or processing: 200 with Retry-After. Once ready: 303 See Other to the file. Failed, canceled or expired: 200 with that status. Another user’s export is reported as not found.",
+        "operationId": "exports.get",
+        "parameters": [
+          {
+            "name": "X-User-Id",
+            "in": "header",
+            "description": "Caller id: 1 to 64 printable ASCII characters. Authentication is out of scope.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "description": "Export id.",
+              "example": "0192f3a1-7c4e-7b2a-9d1f-3e5a8b6c2d10"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobExport"
+                }
+              }
+            }
+          },
+          "303": {
+            "description": "Ready: Location is the file."
+          },
+          "401": {
+            "description": "Error codes: USER_ID_REQUIRED.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error codes: EXPORT_NOT_FOUND.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error codes: TOO_MANY_REQUESTS.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error codes: INTERNAL_ERROR.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Get an export",
+        "tags": [
+          "exports"
+        ]
+      },
+      "delete": {
+        "description": "Stops a queued or processing export. A finished one is returned unchanged.",
+        "operationId": "exports.cancel",
+        "parameters": [
+          {
+            "name": "X-User-Id",
+            "in": "header",
+            "description": "Caller id: 1 to 64 printable ASCII characters. Authentication is out of scope.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "description": "Export id.",
+              "example": "0192f3a1-7c4e-7b2a-9d1f-3e5a8b6c2d10"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobExport"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error codes: USER_ID_REQUIRED.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error codes: EXPORT_NOT_FOUND.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error codes: TOO_MANY_REQUESTS.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error codes: INTERNAL_ERROR.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Cancel an export",
+        "tags": [
+          "exports"
+        ]
+      }
+    },
+    "/v1/exports/{id}/file": {
+      "get": {
+        "description": "The CSV of a ready export, until it expires.",
+        "operationId": "exports.download",
+        "parameters": [
+          {
+            "name": "X-User-Id",
+            "in": "header",
+            "description": "Caller id: 1 to 64 printable ASCII characters. Authentication is out of scope.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "description": "Export id.",
+              "example": "0192f3a1-7c4e-7b2a-9d1f-3e5a8b6c2d10"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CSV file."
+          },
+          "401": {
+            "description": "Error codes: USER_ID_REQUIRED.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error codes: EXPORT_NOT_FOUND, EXPORT_FILE_NOT_FOUND.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error codes: TOO_MANY_REQUESTS.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error codes: INTERNAL_ERROR.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Download an export’s file",
+        "tags": [
+          "exports"
+        ]
+      }
+    }
+  },
+  "info": {
+    "title": "app-nation-case API",
+    "description": "Error responses follow RFC 9457 (application/problem+json).",
+    "version": "1.0.0",
+    "contact": {}
+  },
+  "tags": [],
+  "servers": [],
+  "components": {
+    "schemas": {
+      "Health": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "error"
+            ],
+            "description": "ok when every component is up; degraded when only the cache is down (requests still succeed); error when the database is down.",
+            "example": "ok"
+          },
+          "database": {
+            "type": "string",
+            "enum": [
+              "up",
+              "down"
+            ],
+            "description": "PostgreSQL.",
+            "example": "up"
+          },
+          "cache": {
+            "type": "string",
+            "enum": [
+              "up",
+              "down"
+            ],
+            "description": "Cache Redis. Optional.",
+            "example": "up"
+          }
+        },
+        "required": [
+          "status",
+          "database",
+          "cache"
+        ],
+        "additionalProperties": false,
+        "description": "Reachability of the API and its dependencies."
+      },
+      "ProblemDetails": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "HTTP status text.",
+            "example": "Payment Required"
+          },
+          "status": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "HTTP status code.",
+            "example": 402
+          },
+          "detail": {
+            "type": "string",
+            "description": "Developer-facing explanation in English.",
+            "example": "Not enough credits for this job."
+          },
+          "instance": {
+            "type": "string",
+            "description": "Request path.",
+            "example": "/v1/jobs"
+          },
+          "code": {
+            "type": "string",
+            "description": "Stable error code; clients choose their message by it.",
+            "example": "INSUFFICIENT_CREDITS"
+          },
+          "error": {
+            "type": "string",
+            "description": "The code in lowercase, for clients that read error.",
+            "example": "insufficient_credits"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "Id of the request, for support. Same as the x-request-id header and the requestId in our logs.",
+            "example": "4bf92f3577b34da6a3ce929d0e0e4736"
+          },
+          "errors": {
+            "description": "Field-level errors, only for validation failures.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string",
+                  "description": "Path of the invalid field.",
+                  "example": "input"
+                },
+                "code": {
+                  "type": "string",
+                  "enum": [
+                    "REQUIRED",
+                    "INVALID_TYPE",
+                    "INVALID_FORMAT",
+                    "INVALID_VALUE",
+                    "TOO_SMALL",
+                    "TOO_BIG",
+                    "UNKNOWN_FIELD",
+                    "ALREADY_EXISTS"
+                  ],
+                  "description": "Stable field error code.",
+                  "example": "REQUIRED"
+                },
+                "message": {
+                  "type": "string",
+                  "description": "Developer-facing explanation in English.",
+                  "example": "Field is required."
+                }
+              },
+              "required": [
+                "field",
+                "code",
+                "message"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code",
+          "error",
+          "requestId"
+        ],
+        "additionalProperties": false,
+        "description": "RFC 9457 problem details."
+      },
+      "JobExport": {
+        "type": "object",
+        "properties": {
+          "exportId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+            "description": "Id to poll the export with."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "processing",
+              "ready",
+              "failed",
+              "canceled",
+              "expired"
+            ],
+            "description": "queued and processing: being prepared. ready: the file can be downloaded until expiresAt.",
+            "example": "processing"
+          },
+          "rowCount": {
+            "nullable": true,
+            "description": "Jobs in the file, once ready.",
+            "example": null,
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "errorCode": {
+            "nullable": true,
+            "description": "Set when the export failed.",
+            "example": null,
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          },
+          "finishedAt": {
+            "nullable": true,
+            "description": "Null while queued or processing.",
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          },
+          "expiresAt": {
+            "nullable": true,
+            "description": "When the file is deleted; set once ready.",
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          }
+        },
+        "required": [
+          "exportId",
+          "status",
+          "rowCount",
+          "errorCode",
+          "createdAt",
+          "finishedAt",
+          "expiresAt"
+        ],
+        "additionalProperties": false
+      },
+      "GrantCredits": {
+        "type": "object",
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000,
+            "description": "Credits to add to the balance.",
+            "example": 10
+          }
+        },
+        "required": [
+          "amount"
+        ],
+        "additionalProperties": false
+      },
+      "UserCredits": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[\\x21-\\x7e]+$",
+            "description": "Caller id. Authentication is out of scope.",
+            "example": "user-1"
+          },
+          "balance": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Credits that can be spent now.",
+            "example": 7
+          },
+          "reserved": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Credits held by unfinished jobs; captured or released when they finish.",
+            "example": 3
+          }
+        },
+        "required": [
+          "userId",
+          "balance",
+          "reserved"
+        ],
+        "additionalProperties": false
+      },
+      "CreateJob": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "description": "Job type.",
+            "example": "summary"
+          },
+          "input": {
+            "type": "string",
+            "description": "Text to process. Must not be blank; the maximum length depends on the job type (20000 characters).",
+            "example": "Merhaba dünya"
+          }
+        },
+        "required": [
+          "type",
+          "input"
+        ],
+        "additionalProperties": false
+      },
+      "JobCreated": {
+        "type": "object",
+        "properties": {
+          "jobId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+            "description": "Id to query the job with."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued"
+            ],
+            "description": "Always queued: a retried request returns the first response, even if the job has finished since."
+          }
+        },
+        "required": [
+          "jobId",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "Job": {
+        "type": "object",
+        "properties": {
+          "jobId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "type": {
+            "type": "string",
+            "example": "summary"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "processing",
+              "completed",
+              "failed"
+            ],
+            "example": "completed"
+          },
+          "errorCode": {
+            "nullable": true,
+            "description": "Set when the job failed.",
+            "example": null,
+            "type": "string"
+          },
+          "cost": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Credits reserved for the job.",
+            "example": 3
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          },
+          "finishedAt": {
+            "nullable": true,
+            "description": "Null while the job is queued or processing.",
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          },
+          "result": {
+            "nullable": true,
+            "description": "Set when the job completed.",
+            "example": "Özet: merhaba dünya",
+            "type": "string"
+          }
+        },
+        "required": [
+          "jobId",
+          "type",
+          "status",
+          "errorCode",
+          "cost",
+          "createdAt",
+          "finishedAt",
+          "result"
+        ],
+        "additionalProperties": false
+      },
+      "JobPage": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobListItem"
+            }
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/Pagination"
+          }
+        },
+        "required": [
+          "data",
+          "pagination"
+        ],
+        "additionalProperties": false
+      },
+      "JobListItem": {
+        "type": "object",
+        "properties": {
+          "jobId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "type": {
+            "type": "string",
+            "example": "summary"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "processing",
+              "completed",
+              "failed"
+            ],
+            "example": "completed"
+          },
+          "errorCode": {
+            "nullable": true,
+            "description": "Set when the job failed.",
+            "example": null,
+            "type": "string"
+          },
+          "cost": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Credits reserved for the job.",
+            "example": 3
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          },
+          "finishedAt": {
+            "nullable": true,
+            "description": "Null while the job is queued or processing.",
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          }
+        },
+        "required": [
+          "jobId",
+          "type",
+          "status",
+          "errorCode",
+          "cost",
+          "createdAt",
+          "finishedAt"
+        ],
+        "additionalProperties": false
+      },
+      "Pagination": {
+        "type": "object",
+        "properties": {
+          "nextCursor": {
+            "nullable": true,
+            "description": "Send as cursor to get the next page. Null on the last page.",
+            "type": "string"
+          },
+          "hasMore": {
+            "type": "boolean",
+            "description": "True when another page exists."
+          }
+        },
+        "required": [
+          "nextCursor",
+          "hasMore"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+}

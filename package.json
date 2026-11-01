@@ -1,0 +1,98 @@
+{
+  "name": "app-nation-case",
+  "version": "0.0.1",
+  "description": "",
+  "author": "",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=24.15.0 <25.0.0"
+  },
+  "scripts": {
+    "build": "nest build",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\"",
+    "start": "nest start",
+    "start:dev": "nest start --watch",
+    "start:debug": "nest start --debug --watch",
+    "start:prod": "node dist/src/main",
+    "seed": "npm run build && node dist/src/seed.js",
+    "lint": "oxlint --type-aware src/ test/",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --project unit",
+    "test:watch": "vitest --project unit",
+    "test:cov": "vitest run --coverage",
+    "test:debug": "vitest --project unit --inspect-brk --no-file-parallelism",
+    "test:e2e": "vitest run --project db",
+    "prebuild": "prisma generate",
+    "db:up": "docker compose up -d postgres cache-redis kafka kafka-init",
+    "db:down": "docker compose down",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy",
+    "prisma:studio": "prisma studio",
+    "postinstall": "prisma generate",
+    "docs:generate": "npm run build && node dist/src/generate-openapi.js",
+    "docs:check": "npm run build && node dist/src/generate-openapi.js --check"
+  },
+  "dependencies": {
+    "@confluentinc/kafka-javascript": "1.11.0",
+    "@nestjs/common": "^12.0.1",
+    "@nestjs/config": "^12.0.1",
+    "@nestjs/core": "^12.0.1",
+    "@nestjs/platform-express": "^12.0.1",
+    "@nestjs/swagger": "^12.0.3",
+    "@nestjs/throttler": "^6.7.1",
+    "@prisma/adapter-pg": "^7.10.1",
+    "@prisma/client": "^7.10.1",
+    "dotenv": "^18.0.8",
+    "dotenv-expand": "^13.0.0",
+    "ioredis": "^6.0.0",
+    "pg": "^8.23.1",
+    "prisma": "^7.10.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^12.0.0",
+    "@nestjs/schematics": "^12.0.0",
+    "@nestjs/testing": "^12.0.1",
+    "@types/express": "^5.0.0",
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.23.1",
+    "@types/supertest": "^7.0.0",
+    "@vitest/coverage-v8": "^4.1.2",
+    "oxlint": "^1.58.0",
+    "oxlint-tsgolint": "^7.0.2001",
+    "prettier": "^3.4.2",
+    "source-map-support": "^0.5.21",
+    "supertest": "^7.0.0",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.0",
+    "vitest": "^4.1.2"
+  },
+  "imports": {
+    "#core/*.ts": {
+      "types": "./src/core/*.ts",
+      "default": "./dist/src/core/*.js"
+    },
+    "#infra/*.ts": {
+      "types": "./src/infra/*.ts",
+      "default": "./dist/src/infra/*.js"
+    },
+    "#modules/*.ts": {
+      "types": "./src/modules/*.ts",
+      "default": "./dist/src/modules/*.js"
+    },
+    "#shared/*.ts": {
+      "types": "./src/shared/*.ts",
+      "default": "./dist/src/shared/*.js"
+    },
+    "#generated/*.ts": {
+      "types": "./prisma/generated/*.ts",
+      "default": "./dist/prisma/generated/*.js"
+    }
+  }
+}

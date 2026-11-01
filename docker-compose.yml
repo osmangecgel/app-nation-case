@@ -1,0 +1,250 @@
+name: app-nation-case
+
+# The database address inside the compose network, shared by migrate and app.
+x-database-url: &database-url postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-app_nation_case}?schema=public
+
+services:
+  # Applies pending migrations once and exits (DB-19). The app waits for it to
+  # succeed, so app copies never run migrations themselves. Its output:
+  # `docker compose logs migrate`.
+  migrate:
+    build:
+      context: .
+    image: app-nation-case-app
+    attach: false
+    command: ['node_modules/.bin/prisma', 'migrate', 'deploy']
+    environment:
+      DATABASE_URL: *database-url
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # 500,000 jobs for one user, for EXPLAIN ANALYZE and the CSV export check.
+  # Not part of `docker compose up`: run it with `docker compose run --rm seed`.
+  seed:
+    image: app-nation-case-app
+    profiles: ['tools']
+    command: ['node', 'dist/src/seed.js']
+    environment:
+      DATABASE_URL: *database-url
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # The automated tests, inside the compose network: `docker compose run --rm test`.
+  # Unit tests, then the database and HTTP tests on their own database
+  # (app_nation_case_test) and Redis DB 1, so the running stack's data is untouched.
+  test:
+    build:
+      context: .
+      target: test
+    image: app-nation-case-test
+    # Built here, never on a registry: build on every run instead of trying a
+    # pull first (a confusing "pull access denied"), and never test stale code.
+    pull_policy: build
+    profiles: ['tools']
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      CACHE_REDIS_HOST: cache-redis
+      CACHE_REDIS_PORT: 6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      cache-redis:
+        condition: service_healthy
+
+  # The case's verification flow, step by step: `docker compose run --rm verify all`
+  # (`--help` lists the checks). It drives this stack the way the case describes
+  # (kills and starts the worker, reads logs and memory), so it gets the Docker
+  # socket; a tool for this machine, not something to deploy.
+  verify:
+    build:
+      context: .
+      target: verify
+    image: app-nation-case-verify
+    pull_policy: build # Same reason as test.
+    profiles: ['tools']
+    environment:
+      API: http://app:${PORT:-13400}
+    volumes:
+      - .:/project:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # `docker compose up` starts the app too. For `npm run start:dev`, start only
+  # the services it needs with `npm run db:up`, so the app port stays free.
+  app:
+    build:
+      context: .
+    image: app-nation-case-app
+    # Optional: `docker compose up` works on a fresh clone without it; the
+    # defaults are the .env.example values.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: *database-url
+      CACHE_REDIS_URL: redis://cache-redis:6379
+      # The container runs like production; .env is written for local development.
+      NODE_ENV: production
+      # Coloured lines in `docker compose up`. In production LOG_FORMAT=json, one
+      # object per line with requestId and jobId, for any log collector.
+      LOG_FORMAT: pretty
+      # Production never returns stack traces (ERR-08); the app refuses to start otherwise.
+      ERROR_INCLUDE_STACK: 'false'
+      # Request bodies carry the user's input, which must never be logged; .env
+      # turns body and query logs on for local debugging only.
+      LOG_HTTP_BODIES: 'false'
+      LOG_DB_QUERIES: 'false'
+      # 1 behind one load balancer, so the per-IP rate limit sees the client's address.
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-0}
+      # Same value as the published port, so `PORT=13410 docker compose up` changes both.
+      PORT: ${PORT:-13400}
+      # Background export files, written by the worker and served by the app.
+      EXPORT_FILES_DIR: /data/exports
+    volumes:
+      - export-files:/data/exports
+    ports:
+      - '${PORT:-13400}:${PORT:-13400}'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      cache-redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Processes jobs from Kafka, relays the outbox to Kafka and runs the
+  # reconciler. Scale it with `docker compose up --scale worker=2`.
+  worker:
+    image: app-nation-case-app
+    command: ['node', 'dist/src/worker.js']
+    # Optional: `docker compose up` works on a fresh clone without it; the
+    # defaults are the .env.example values.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: *database-url
+      CACHE_REDIS_URL: redis://cache-redis:6379
+      KAFKA_BROKERS: kafka:9092
+      NODE_ENV: production
+      LOG_FORMAT: pretty
+      ERROR_INCLUDE_STACK: 'false'
+      LOG_HTTP_BODIES: 'false'
+      LOG_DB_QUERIES: 'false'
+      EXPORT_FILES_DIR: /data/exports
+    volumes:
+      - export-files:/data/exports
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+      cache-redis:
+        condition: service_healthy
+    # SIGTERM gives running jobs WORKER_SHUTDOWN_GRACE_MS (25 s) to finish;
+    # Docker's default of 10 s would kill them first.
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  # A single-node Kafka in KRaft mode (no ZooKeeper). Containers reach it as
+  # kafka:9092; the host (tests, local worker) as localhost:${KAFKA_PORT}.
+  kafka:
+    image: apache/kafka:4.1.0
+    attach: false # Same reason as postgres.
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:19092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:${KAFKA_PORT:-19092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics are created explicitly by kafka-init, with the partition count we chose.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    ports:
+      - '${KAFKA_PORT:-19092}:19092'
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ['CMD-SHELL', '/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1']
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  # Creates the topics once and exits. 12 partitions: up to 12 workers share
+  # the topic. A worker handles the messages of a partition side by side, so
+  # the partition count limits the workers, not the jobs running at once. Jobs
+  # with the same content share a partition, so they reach the same worker and
+  # share one provider call there.
+  kafka-init:
+    image: apache/kafka:4.1.0
+    attach: false # Same reason as postgres.
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - >-
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
+        --topic jobs.process --partitions 12 --replication-factor 1 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
+        --topic jobs.process.dlq --partitions 1 --replication-factor 1 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
+        --topic exports.process --partitions 6 --replication-factor 1 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
+        --topic exports.process.dlq --partitions 1 --replication-factor 1
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17.11-alpine
+    # `docker compose up` prints only the app logs. Every service except app has
+    # attach: false; read its logs with `docker compose logs <service>`.
+    attach: false
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-app_nation_case}
+    ports:
+      - '${POSTGRES_PORT:-15432}:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-app_nation_case}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Cache may lose keys under memory pressure; keys always have a TTL (CACHE-04).
+  # Job results, rejections, provider call locks and rate limit counters. Every
+  # key expires; when memory is full the least frequently used go first, so
+  # popular results stay. Not persisted: results are also in PostgreSQL and a
+  # restarted Redis fills again from there.
+  cache-redis:
+    image: redis:7.4.12-alpine
+    attach: false # Same reason as postgres.
+    command: ['redis-server', '--maxmemory', '256mb', '--maxmemory-policy', 'allkeys-lfu', '--save', '']
+    ports:
+      - '${CACHE_REDIS_PORT:-16390}:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  kafka-data:
+  # Shared by app and worker: the local file store of background exports.
+  export-files:
